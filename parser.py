@@ -1,7 +1,6 @@
 import json
 from datetime import datetime
 
-# (The get_message_representation function is unchanged)
 def get_message_representation(message):
     if message.get("content"): return message["content"]
     if message.get("photos"): return f"[Photo: {message['photos'][0]['uri']}]"
@@ -11,39 +10,32 @@ def get_message_representation(message):
     if message.get("audio_files"): return f"[Audio: {message['audio_files'][0]['uri']}]"
     return "[Non-text message]"
 
-# --- Initialize variables ---
-like_counts, message_counts, reaction_giver_counts = {}, {}, {}
-min_timestamp_ms, max_timestamp_ms = float('inf'), float('-inf')
-max_reactions, most_reacted_message, most_reacted_sender = 0, None, None
-top_messages, output_lines = [], []
+def generate_report(messages_list, section_title, like_cutoff, message_cutoff):
+    like_counts, message_counts, reaction_giver_counts = {}, {}, {}
+    min_timestamp_ms, max_timestamp_ms = float('inf'), float('-inf')
+    max_reactions, most_reacted_message, most_reacted_sender = 0, None, None
+    top_messages, output_lines = [], []
 
-try:
-    with open("combined_messages.json", "r", encoding="utf-8") as file:
-        json_data = json.load(file)
+    output_lines.append(f"=== SECTION: {section_title} ===")
 
-    messages_list = json_data["messages"]
+    if not messages_list:
+        output_lines.append("No messages found in this time period.\n")
+        return output_lines
 
-    # --- Main loop to gather data ---
     for message in messages_list:
         sender = message.get("sender_name", "Unknown Sender")
-        
-        # --- Change 1: Ignore any message sent by Meta AI ---
         if sender == "Meta AI":
             continue
 
         reactions = message.get("reactions", [])
         for reaction in reactions:
             actor = reaction.get("actor")
-            
-            # --- Change 2: Ignore any reaction given by Meta AI ---
             if actor == "Meta AI":
                 continue
-            
             if actor: reaction_giver_counts[actor] = reaction_giver_counts.get(actor, 0) + 1
         
         message_counts[sender] = message_counts.get(sender, 0) + 1
         
-        # (The rest of the data gathering is the same)
         content, num_reactions = get_message_representation(message), len(reactions)
         timestamp_ms = message.get("timestamp_ms")
         if timestamp_ms: min_timestamp_ms, max_timestamp_ms = min(min_timestamp_ms, timestamp_ms), max(max_timestamp_ms, timestamp_ms)
@@ -51,12 +43,10 @@ try:
         if num_reactions > max_reactions: max_reactions, most_reacted_message, most_reacted_sender = num_reactions, content, sender
         if num_reactions > 3: top_messages.append((sender, content, num_reactions))
 
-    # --- After loop, calculate multipliers using percentile tiers ---
     user_multipliers = {}
     all_users = list(message_counts.keys())
     giver_counts_full = {user: reaction_giver_counts.get(user, 0) for user in all_users}
     
-    # (The rest of the script is unchanged and will now exclude Meta AI from all calculations)
     if giver_counts_full:
         sorted_givers = sorted(giver_counts_full.items(), key=lambda item: item[1])
         num_users = len(sorted_givers)
@@ -68,24 +58,16 @@ try:
             elif i < p90_index: user_multipliers[user] = 1.1
             else: user_multipliers[user] = 1.2
     
-    start_date, end_date = datetime.fromtimestamp(min_timestamp_ms / 1000).strftime('%B %d, %Y'), datetime.fromtimestamp(max_timestamp_ms / 1000).strftime('%B %d, %Y')
+    start_date = datetime.fromtimestamp(min_timestamp_ms / 1000).strftime('%B %d, %Y') if min_timestamp_ms != float('inf') else "N/A"
+    end_date = datetime.fromtimestamp(max_timestamp_ms / 1000).strftime('%B %d, %Y') if max_timestamp_ms != float('-inf') else "N/A"
     output_lines.extend([f"--- Chat History Time Period ---", f"Messages from: {start_date} to {end_date}\n"])
     
-    # Build leaderboard but only include users who meet both thresholds:
-    #  - at least 10 lifetime likes, and
-    #  - at least 500 total messages
-    # Reason: this focuses ranking on frequent participants with meaningful engagement.
-    LIKE_CUTOFF = 10
-    MESSAGE_CUTOFF = 500
     reaction_leaderboard_data = []
     for sender, total_messages in message_counts.items():
         total_likes = like_counts.get(sender, 0)
-        # Skip users who don't meet both cutoffs
-        if total_likes < LIKE_CUTOFF or total_messages < MESSAGE_CUTOFF:
+        if total_likes < like_cutoff or total_messages < message_cutoff:
             continue
-        lpm = 0
-        if total_messages > 0:
-            lpm = total_likes / total_messages
+        lpm = total_likes / total_messages if total_messages > 0 else 0
         multiplier = user_multipliers.get(sender, 1.0)
         adjusted_lpm = lpm * multiplier
         reaction_leaderboard_data.append({"name": sender, "likes": total_likes, "lpm": lpm, "adjusted_lpm": adjusted_lpm})
@@ -113,10 +95,34 @@ try:
     for name, msg, count in top_messages:
         output_lines.append(f"{name}: {msg} | Reactions: {count}")
 
-    with open("chat_analysis_report.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(output_lines))
+    return output_lines
+
+try:
+    with open("master_combined_messages.json", "r", encoding="utf-8") as file:
+        json_data = json.load(file)
+
+    messages_list = json_data["messages"]
     
-    print("Success! Analysis complete (ignoring Meta AI). Report saved to 'chat_analysis_report.txt'")
+    # 1. Complete History Report
+    complete_report = generate_report(messages_list, "Complete History", like_cutoff=10, message_cutoff=500)
+    
+    # 2. Since September 19th Report
+    # Modify the year here if needed
+    cutoff_date = datetime(2025, 9, 19) 
+    cutoff_ms = int(cutoff_date.timestamp() * 1000)
+    
+    recent_messages = [msg for msg in messages_list if msg.get("timestamp_ms", 0) >= cutoff_ms]
+    
+    # Reduced cutoffs for the shorter timeframe to ensure people still make the board
+    recent_report = generate_report(recent_messages, f"Since {cutoff_date.strftime('%B %d, %Y')}", like_cutoff=2, message_cutoff=100)
+    
+    # Combine and save
+    full_output = complete_report + ["\n"] + recent_report
+
+    with open("chat_analysis_report.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(full_output))
+    
+    print("Success! Multi-scale analysis complete. Report saved to 'chat_analysis_report.txt'")
 
 except FileNotFoundError:
     print("Error: The file 'combined_messages.json' was not found.")
